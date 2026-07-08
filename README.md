@@ -1,6 +1,6 @@
-# Paru
+# QP-ng
 
-Feature packed AUR helper
+QP-ng is an AUR helper forked from [paru](https://github.com/Morganamilo/paru), originally created by [Morganamilo](https://github.com/Morganamilo).
 
 [![paru](https://img.shields.io/aur/version/paru?color=1793d1&label=paru&logo=arch-linux&style=for-the-badge)](https://aur.archlinux.org/packages/paru/)
 [![paru-bin](https://img.shields.io/aur/version/paru-bin?color=1793d1&label=paru-bin&logo=arch-linux&style=for-the-badge)](https://aur.archlinux.org/packages/paru-bin/)
