@@ -230,7 +230,7 @@ pub async fn getpkgbuilds(config: &mut Config) -> Result<i32> {
     Ok(ret)
 }
 
-fn repo_pkgbuilds(config: &Config, pkgs: &[Targ<'_>]) -> Result<i32> {
+pub fn repo_pkgbuilds(config: &Config, pkgs: &[Targ<'_>]) -> Result<i32> {
     let pkgctl = &config.pkgctl_bin;
 
     for (n, targ) in pkgs.iter().enumerate() {

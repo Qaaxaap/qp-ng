@@ -1,4 +1,4 @@
-use paru::run;
+use qp_ng::run;
 use std::process::exit;
 
 #[tokio::main]

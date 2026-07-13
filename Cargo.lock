@@ -1474,49 +1474,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paru"
-version = "2.1.0"
-dependencies = [
- "alpm",
- "alpm-utils",
- "ansiterm",
- "anyhow",
- "async-trait",
- "aur-depends",
- "aur-fetch",
- "bitflags 2.10.0",
- "chrono",
- "cini",
- "dirs",
- "env_logger",
- "flate2",
- "futures",
- "globset",
- "htmlescape",
- "indicatif",
- "log",
- "nix",
- "pacmanconf",
- "raur",
- "regex",
- "reqwest",
- "rss",
- "scraper",
- "serde",
- "serde_json",
- "signal-hook",
- "smart-default",
- "srcinfo",
- "tempfile",
- "terminal_size",
- "tokio",
- "toml",
- "tr",
- "unicode-width",
- "url",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1630,6 +1587,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "535d180e0ecab6268a3e718bb9fd44db66bbbc256257165fc699dadf70d16fe7"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "qp-ng"
+version = "2.1.0"
+dependencies = [
+ "alpm",
+ "alpm-utils",
+ "ansiterm",
+ "anyhow",
+ "async-trait",
+ "aur-depends",
+ "aur-fetch",
+ "bitflags 2.10.0",
+ "chrono",
+ "cini",
+ "dirs",
+ "env_logger",
+ "flate2",
+ "futures",
+ "globset",
+ "htmlescape",
+ "indicatif",
+ "log",
+ "nix",
+ "pacmanconf",
+ "raur",
+ "regex",
+ "reqwest",
+ "rss",
+ "scraper",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "smart-default",
+ "srcinfo",
+ "tempfile",
+ "terminal_size",
+ "tokio",
+ "toml",
+ "tr",
+ "unicode-width",
+ "url",
 ]
 
 [[package]]
