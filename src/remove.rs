@@ -1,4 +1,5 @@
 use crate::devel::{load_devel_info, save_devel_info};
+use crate::manual::{load_manual_state, save_manual_state};
 use crate::print_error;
 use crate::search::interactive_search_local;
 use crate::util::pkg_base_or_name;
@@ -52,6 +53,18 @@ pub fn remove(config: &mut Config) -> Result<i32> {
     if let Err(err) = save_devel_info(config, &devel_info) {
         print_error(config.color.error, err);
         ret = 1;
+    }
+
+    // Clean up manual state entries for removed packages
+    if let Ok(mut manual_state) = load_manual_state(config) {
+        if let Some(ref mut state) = manual_state {
+            for target in &config.targets {
+                if let Some(info) = state.packages.get_mut(target) {
+                    info.manually_installed = false;
+                }
+            }
+            let _ = save_manual_state(config, state);
+        }
     }
 
     Ok(ret)

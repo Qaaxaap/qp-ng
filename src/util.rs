@@ -59,6 +59,20 @@ pub fn split_repo_aur_targets<'a, T: AsTarg>(
             } else {
                 local.push(targ);
             }
+        } else if let Some(resolution) = resolve_overlay(config, targ.pkg) {
+            let candidate = match resolution {
+                OverlayResolution::Unique(c) => c,
+                OverlayResolution::Conflict(candidates) => {
+                    pick_overlay(config, targ.pkg, &candidates)
+                }
+            };
+            let in_official = dbs.pkg(targ.pkg).is_ok()
+                || dbs.find_target_satisfier(targ.pkg).is_some();
+            if in_official && !candidate.can_override_official {
+                local.push(targ);
+            } else {
+                aur.push(targ);
+            }
         } else if dbs.pkg(targ.pkg).is_ok()
             || dbs.find_target_satisfier(targ.pkg).is_some()
             || dbs
@@ -66,7 +80,11 @@ pub fn split_repo_aur_targets<'a, T: AsTarg>(
                 .filter(|db| targ.repo.is_none() || db.name() == targ.repo.unwrap())
                 .any(|db| db.group(targ.pkg).is_ok())
         {
-            local.push(targ);
+            if config.build_official_from_source {
+                aur.push(targ);
+            } else {
+                local.push(targ);
+            }
         } else {
             aur.push(targ);
         }
@@ -399,4 +417,92 @@ pub fn is_arch_repo(name: &str) -> bool {
             | "extra-testing"
             | "multilib-testing"
     )
+}
+
+/// Result of overlay lookup for a package
+#[derive(Clone, Debug)]
+pub struct OverlayMatch {
+    pub name: String,
+    pub priority: u32,
+    pub can_override_official: bool,
+}
+
+pub enum OverlayResolution {
+    /// Unique highest-priority overlay wins
+    Unique(OverlayMatch),
+    /// Multiple candidates with same priority, or priority 0 → user must pick
+    Conflict(Vec<OverlayMatch>),
+}
+
+/// Find overlay candidates for a package, resolving by priority.
+/// Returns None if no overlay provides this package.
+fn resolve_overlay(config: &Config, pkg: &str) -> Option<OverlayResolution> {
+    let candidates: Vec<OverlayMatch> = config
+        .pkgbuild_repos
+        .repos
+        .iter()
+        .filter(|repo| repo.pkg(config, pkg).is_some())
+        .map(|repo| OverlayMatch {
+            name: repo.name.clone(),
+            priority: repo.priority,
+            can_override_official: repo.can_override_official,
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Priority 0 means unset — always requires user input
+    if candidates.iter().any(|c| c.priority == 0) {
+        return Some(OverlayResolution::Conflict(candidates));
+    }
+
+    let best_priority = candidates.iter().map(|c| c.priority).min().unwrap();
+    let best: Vec<OverlayMatch> = candidates
+        .into_iter()
+        .filter(|c| c.priority == best_priority)
+        .collect();
+
+    if best.len() == 1 {
+        Some(OverlayResolution::Unique(best.into_iter().next().unwrap()))
+    } else {
+        Some(OverlayResolution::Conflict(best))
+    }
+}
+
+/// Let the user pick one overlay from a list of conflicting candidates.
+fn pick_overlay(config: &Config, pkg: &str, candidates: &[OverlayMatch]) -> OverlayMatch {
+    let c = config.color;
+    println!(
+        "{} {}",
+        c.action.paint("::"),
+        c.bold.paint(tr!(
+            "there are {n} overlays providing {pkg}:",
+            n = candidates.len(),
+            pkg = pkg
+        ))
+    );
+    for (i, cand) in candidates.iter().enumerate() {
+        let prio = if cand.priority == 0 {
+            tr!("unset").to_string()
+        } else {
+            cand.priority.to_string()
+        };
+        let n = (i + 1).to_string();
+        println!(
+            "{} {}/{} {} {}",
+            c.number_menu.paint(n),
+            cand.name,
+            pkg,
+            tr!("(priority: {})", prio),
+            if cand.can_override_official {
+                tr!("[override]")
+            } else {
+                String::new()
+            }
+        );
+    }
+    let idx = get_provider(candidates.len(), config.no_confirm);
+    candidates[idx].clone()
 }

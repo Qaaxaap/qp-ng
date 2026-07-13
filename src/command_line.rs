@@ -321,6 +321,27 @@ impl Config {
             Arg::Long("getpkgbuild") | Arg::Short('G') => set_op(Op::GetPkgBuild),
             Arg::Long("repoctl") | Arg::Short('L') => set_op(Op::RepoCtl),
             Arg::Long("chrootctl") | Arg::Short('C') => set_op(Op::ChrootCtl),
+            Arg::Long("mark-installed") => {
+                self.mark_installed = true;
+                set_op(Op::ManualCtl);
+            }
+            Arg::Long("mark-uninstalled") => {
+                self.mark_uninstalled = true;
+                set_op(Op::ManualCtl);
+            }
+            Arg::Long("list-manual") => {
+                self.list_manual = true;
+                set_op(Op::ManualCtl);
+            }
+            Arg::Long("mark-provides") => {
+                self.mark_provides = value?.to_string().split(',').map(|s| s.trim().to_string()).collect();
+            }
+            Arg::Long("mark-depends") => {
+                self.mark_depends = value?.to_string().split(',').map(|s| s.trim().to_string()).collect();
+            }
+            Arg::Long("auto-provides") => {
+                self.mark_auto_provides = true;
+            }
             // globals
             Arg::Long("noconfirm") => self.no_confirm = true,
             Arg::Long("confirm") => self.no_confirm = false,
@@ -431,6 +452,8 @@ fn takes_value(arg: Arg) -> TakesValue {
         Arg::Long("provides") => TakesValue::Optional,
         Arg::Long("clonedir") => TakesValue::Required,
         Arg::Long("develfile") => TakesValue::Required,
+        Arg::Long("mark-provides") => TakesValue::Required,
+        Arg::Long("mark-depends") => TakesValue::Required,
         //pacman
         Arg::Long("dbpath") | Arg::Short('b') => TakesValue::Required,
         Arg::Long("root") | Arg::Short('r') => TakesValue::Required,

@@ -211,6 +211,7 @@ pub enum Op {
     Sync,
     Upgrade,
     Build,
+    ManualCtl,
 }
 
 impl ConfigEnum for Op {
@@ -227,6 +228,7 @@ impl ConfigEnum for Op {
         ("sync", Self::Sync),
         ("upgrade", Self::Upgrade),
         ("build", Self::Build),
+        ("manualctl", Self::ManualCtl),
         ("default", Self::Default),
     ];
 }
@@ -413,6 +415,7 @@ pub struct Config {
     pub cache_dir: PathBuf,
     pub state_dir: PathBuf,
     pub devel_path: PathBuf,
+    pub manual_path: PathBuf,
     pub config_path: Option<PathBuf>,
 
     pub news: u32,
@@ -526,6 +529,14 @@ pub struct Config {
     pub list: bool,
     pub delete: u32,
     pub no_install: bool,
+    pub mark_installed: bool,
+    pub mark_uninstalled: bool,
+    pub list_manual: bool,
+    pub mark_provides: Vec<String>,
+    pub mark_depends: Vec<String>,
+    pub mark_auto_provides: bool,
+    /// Prefer building official repo packages from GitLab source instead of binaries
+    pub build_official_from_source: bool,
 
     pub env: Vec<(String, String)>,
 
@@ -544,6 +555,7 @@ pub struct Config {
     #[default(GlobSetBuilder::new())]
     pub ignore_devel_builder: GlobSetBuilder,
     pub assume_installed: Vec<String>,
+    pub manual_state: Option<crate::manual::ManualState>,
 
     #[default(PkgbuildRepos::new(aur_fetch::Fetch::with_cache_dir("repo")))]
     pub pkgbuild_repos: PkgbuildRepos,
@@ -570,7 +582,7 @@ impl Ini for Config {
             CallbackKind::Directive(_, key, value) => self.parse_directive(key, value),
         };
 
-        let filename = cb.filename.unwrap_or("paru.conf");
+        let filename = cb.filename.unwrap_or("qp.conf");
         err.map_err(|e| anyhow!("{}:{}: {}", filename, cb.line_number, e))
     }
 }
@@ -579,20 +591,21 @@ impl Config {
     pub fn new() -> Result<Self> {
         let cache =
             dirs::cache_dir().ok_or_else(|| anyhow!(tr!("failed to find cache directory")))?;
-        let cache = cache.join("paru");
+        let cache = cache.join("qp");
         let config =
             dirs::config_dir().ok_or_else(|| anyhow!(tr!("failed to find config directory")))?;
-        let config = config.join("paru");
+        let config = config.join("qp");
         let state = dirs::state_dir()
             .or_else(dirs::cache_dir)
             .ok_or_else(|| anyhow!(tr!("failed to find state directory")))?;
-        let state = state.join("paru");
+        let state = state.join("qp");
 
         let build_dir = cache.join("clone");
         let old_old_devel_path = cache.join("devel.json");
         let old_devel_path = state.join("devel.json");
         let devel_path = state.join("devel.toml");
-        let config_path = config.join("paru.conf");
+        let manual_path = state.join("manual.toml");
+        let config_path = config.join("qp.conf");
 
         let old = if old_devel_path.exists() {
             Some(&old_devel_path)
@@ -615,6 +628,7 @@ impl Config {
             cache_dir,
             state_dir,
             devel_path,
+            manual_path,
             ..Self::default()
         };
 
@@ -628,7 +642,7 @@ impl Config {
             }
         }
 
-        if let Ok(conf) = var("PARU_CONF") {
+        if let Ok(conf) = var("QP_CONF") {
             let path = PathBuf::from(conf);
             ensure!(
                 path.exists(),
@@ -638,7 +652,7 @@ impl Config {
         } else if config_path.exists() {
             config.config_path = Some(config_path);
         } else {
-            let config_path = PathBuf::from("/etc/paru.conf");
+            let config_path = PathBuf::from("/etc/qp.conf");
 
             if config_path.exists() {
                 config.config_path = Some(config_path);
@@ -727,10 +741,10 @@ impl Config {
         {
             use std::time::Duration;
 
-            let ver = option_env!("PARU_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+            let ver = option_env!("QP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
             let client = reqwest::Client::builder()
                 .tcp_keepalive(Duration::new(15, 0))
-                .user_agent(format!("paru/{}", ver))
+                .user_agent(format!("qp/{}", ver))
                 .build()?;
 
             let rpc_url = match &self.aur_rpc_url {
@@ -811,7 +825,7 @@ impl Config {
     Server = file:///var/lib/repo/aur
 
 then initialise it with:
-    paru -Ly"
+    qp -Ly"
                 );
             }
 
@@ -886,6 +900,11 @@ then initialise it with:
 
         for group in &self.ignore_group {
             alpm.add_ignoregroup(group.as_str())?;
+        }
+
+        // Sync manually tracked packages into alpm
+        if let Some(ref manual_state) = self.manual_state {
+            crate::manual::sync_manual_state_to_alpm(&mut alpm, manual_state);
         }
 
         Ok(alpm)
@@ -978,6 +997,8 @@ then initialise it with:
             "Depth" => repo.depth = value?.parse()?,
             "SkipReview" => repo.skip_review = true,
             "GenerateSrcinfo" => repo.force_srcinfo = true,
+            "Priority" => repo.priority = value?.parse()?,
+            "OverrideOfficial" => repo.can_override_official = true,
             _ => eprintln!("{}", tr!("error: unknown option '{}' in repo", key)),
         }
 
@@ -1082,6 +1103,7 @@ then initialise it with:
             "KeepRepoCache" => self.keep_repo_cache = true,
             "FailFast" => self.fail_fast = true,
             "KeepSrc" => self.keep_src = true,
+            "BuildOfficialFromSource" => self.build_official_from_source = true,
             "SignDb" => {
                 self.sign_db = match value {
                     Some(v) => Sign::Key(v.to_string()),
@@ -1169,8 +1191,8 @@ then initialise it with:
 }
 
 pub fn version() {
-    let ver = option_env!("PARU_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
-    print!("paru v{}", ver);
+    let ver = option_env!("QP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    print!("qp v{}", ver);
     #[cfg(feature = "git")]
     print!(" +git");
     println!(" - libalpm v{}", alpm::version());

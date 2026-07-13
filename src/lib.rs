@@ -4,6 +4,7 @@ mod clean;
 mod command_line;
 mod completion;
 mod config;
+mod db;
 mod devel;
 mod download;
 mod exec;
@@ -12,6 +13,7 @@ mod help;
 mod info;
 mod install;
 mod keys;
+mod manual;
 mod news;
 mod order;
 mod pkgbuild;
@@ -66,11 +68,11 @@ macro_rules! printtr {
 }
 
 fn debug_enabled() -> bool {
-    env::var("PARU_DEBUG").as_deref().unwrap_or("0") != "0"
+    env::var("QP_DEBUG").as_deref().unwrap_or("0") != "0"
 }
 
 fn alpm_debug_enabled() -> bool {
-    debug_enabled() && env::var("PARU_ALPM_DEBUG").is_ok_and(|v| v != "0")
+    debug_enabled() && env::var("QP_ALPM_DEBUG").is_ok_and(|v| v != "0")
 }
 
 fn print_error(color: Style, err: Error) {
@@ -219,6 +221,7 @@ async fn handle_cmd(config: &mut Config) -> Result<i32> {
         Op::Default => handle_default(config).await?,
         Op::RepoCtl => handle_repo(config)?,
         Op::ChrootCtl => handle_chroot(config)?,
+        Op::ManualCtl => handle_manualctl(config)?,
         // _ => bail!("unknown op '{}'", config.op),
     };
 
@@ -406,6 +409,65 @@ fn handle_repo(config: &mut Config) -> Result<i32> {
 
     repo::print(repos, config, repoc, pkgc, version, installedc);
 
+    Ok(0)
+}
+
+fn handle_manualctl(config: &mut Config) -> Result<i32> {
+    config.init_alpm()?;
+    let mut manual_state = crate::manual::load_manual_state(config)?.unwrap_or_default();
+
+    if config.mark_installed {
+        let provides = config.mark_provides.clone();
+        let depends = config.mark_depends.clone();
+        let auto_provides = config.mark_auto_provides;
+
+        // targets: pairs of (name, version), version defaults to "0.0.0-1"
+        let mut i = 0;
+        while i < config.targets.len() {
+            let pkg = &config.targets[i];
+            let version = if i + 1 < config.targets.len() {
+                let next = &config.targets[i + 1];
+                if next.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    i += 1;
+                    next.as_str()
+                } else {
+                    "0.0.0-1"
+                }
+            } else {
+                "0.0.0-1"
+            };
+            i += 1;
+
+            // Auto-detect provides from ELF files if requested
+            let mut provides = provides.clone();
+            if auto_provides {
+                if let Some(auto) = crate::manual::detect_elf_provides(pkg) {
+                    provides.extend(auto);
+                }
+            }
+
+            crate::manual::mark_manually_installed(
+                config, pkg, version, &provides, &depends, &mut manual_state,
+            )?;
+            println!("{}: {} {}", tr!("marked as manually installed"), pkg, version);
+            if !provides.is_empty() {
+                println!("  provides: {}", provides.join(", "));
+            }
+            if !depends.is_empty() {
+                println!("  depends: {}", depends.join(", "));
+            }
+        }
+    } else if config.mark_uninstalled {
+        for pkg in &config.targets {
+            crate::manual::mark_manually_uninstalled(config, pkg, &mut manual_state)?;
+            println!("{}: {}", tr!("marked as manually uninstalled"), pkg);
+        }
+    } else if config.list_manual {
+        crate::manual::list_manual_state(config, &manual_state);
+    }
+
+    // Cache for use during alpm init (next run)
+    config.manual_state = Some(manual_state);
     Ok(0)
 }
 

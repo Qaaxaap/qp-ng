@@ -218,7 +218,15 @@ pub async fn get_upgrades<'a, 'b>(
     let mut devel_upgrades =
         filter_devel_updates(config, resolver.get_cache_mut(), &devel_upgrades).await?;
 
-    let repo_upgrades = if config.mode.repo() && config.combined_upgrade {
+    // Skip manually installed packages from upgrade lists
+    if let Some(ref manual_state) = config.manual_state {
+        aur_upgrades.retain(|u| !manual_state.is_manually_installed(u.local.name()));
+    }
+
+    let repo_upgrades = if config.mode.repo()
+        && config.combined_upgrade
+        && !config.build_official_from_source
+    {
         repo_upgrades(config)?
     } else {
         Vec::new()

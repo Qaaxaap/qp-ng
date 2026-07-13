@@ -72,6 +72,7 @@ struct Installer {
     devel_info: DevelInfo,
     new_devel_info: DevelInfo,
     built: Vec<String>,
+    manual_state: crate::manual::ManualState,
 }
 
 pub async fn install(config: &mut Config, targets_str: &[String]) -> Result<()> {
@@ -121,6 +122,7 @@ impl Installer {
             devel_info: DevelInfo::default(),
             new_devel_info: DevelInfo::default(),
             built: Vec::new(),
+            manual_state: config.manual_state.clone().unwrap_or_default(),
         }
     }
 
@@ -400,6 +402,10 @@ impl Installer {
 
             asdeps(config, &self.deps)?;
             asexp(config, &self.exp)?;
+
+            // Persist manual tracking state
+            crate::manual::save_manual_state(config, &self.manual_state)?;
+
             self.deps.clear();
             self.exp.clear();
             self.install_queue.clear();
@@ -905,7 +911,41 @@ impl Installer {
         config.args.targets = config.targets.clone();
 
         let targets = args::parse_targets(targets_str);
-        let (mut repo_targets, aur_targets) = split_repo_aur_targets(config, &targets)?;
+        let (mut repo_targets, mut aur_targets) = split_repo_aur_targets(config, &targets)?;
+
+        // Fetch official package PKGBUILDs from Arch GitLab for source-building
+        if config.build_official_from_source && !aur_targets.is_empty() {
+            let (official, rest): (Vec<_>, Vec<_>) =
+                aur_targets.into_iter().partition(|t| {
+                    config.alpm.syncdbs().pkg(t.pkg).is_ok()
+                });
+            aur_targets = rest;
+
+            if !official.is_empty() {
+                let clone_base = config.fetch.clone_dir.join("official");
+                std::fs::create_dir_all(&clone_base)?;
+                let prev_dir = std::env::current_dir()?;
+                std::env::set_current_dir(&clone_base)?;
+                let _ = download::repo_pkgbuilds(config, &official);
+                std::env::set_current_dir(&prev_dir)?;
+
+                let dirs: Vec<PathBuf> = std::fs::read_dir(&clone_base)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .map(|e| e.path())
+                    .filter(|p| p.join("PKGBUILD").exists())
+                    .collect();
+
+                if !dirs.is_empty() {
+                    match PkgbuildRepo::from_pkgbuilds(config, &dirs) {
+                        Ok(repo) => config.pkgbuild_repos.repos.push(repo),
+                        Err(e) => print_error(config.color.error, e),
+                    }
+                }
+            }
+        }
 
         if targets_str.is_empty() && self.sysupgrade == 0 && !self.sysupgrade == 0 {
             bail!(tr!("no targets specified (use -h for help)"));
@@ -1017,6 +1057,15 @@ impl Installer {
         );
 
         let mut actions = resolver.resolve_targets(&targets).await?;
+
+        // Filter out packages marked as manually uninstalled
+        // to prevent them from being auto-reinstalled as dependencies
+        actions.install.retain(|pkg| {
+            !self
+                .manual_state
+                .is_manually_uninstalled(pkg.pkg.name())
+        });
+
         debug!("{:#?}", actions);
         let repo_targs = actions
             .install
@@ -1721,7 +1770,7 @@ pub fn review(config: &Config, fetch: &aur_fetch::Fetch, pkgs: &[&str]) -> Resul
             }
 
             if config.save_changes {
-                fetch.commit(pkgs, "paru save changes")?;
+                fetch.commit(pkgs, "qp save changes")?;
             }
         } else {
             let unseen = fetch.unseen(pkgs)?;
@@ -1730,13 +1779,13 @@ pub fn review(config: &Config, fetch: &aur_fetch::Fetch, pkgs: &[&str]) -> Resul
             let diffs = fetch.diff(&has_diff, config.color.enabled)?;
 
             if printed {
-                let pager_unconfigured = var("PARU_PAGER").is_err() && var("PAGER").is_err();
+                let pager_unconfigured = var("QP_PAGER").is_err() && var("PAGER").is_err();
                 let pager = if has_command("less") { "less" } else { "cat" };
 
                 let pager = config
                     .pager_cmd
                     .clone()
-                    .or_else(|| var("PARU_PAGER").ok())
+                    .or_else(|| var("QP_PAGER").ok())
                     .or_else(|| var("PAGER").ok())
                     .unwrap_or_else(|| pager.to_string());
 

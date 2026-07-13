@@ -65,6 +65,10 @@ pub struct PkgbuildRepo {
     pub skip_review: bool,
     pub force_srcinfo: bool,
     pub path: PathBuf,
+    /// Lower number = higher priority (1 is highest, 0 = unset / always ask)
+    pub priority: u32,
+    /// Whether this overlay can override official repo packages
+    pub can_override_official: bool,
     pkgs: OnceCell<Arc<Vec<PkgbuildPkg>>>,
 }
 
@@ -77,6 +81,8 @@ impl PkgbuildRepo {
             source: RepoSource::None,
             skip_review: false,
             force_srcinfo: false,
+            priority: 0,
+            can_override_official: false,
             pkgs: OnceCell::new(),
         }
     }
@@ -118,6 +124,8 @@ impl PkgbuildRepo {
             skip_review: true,
             force_srcinfo: false,
             path: dir,
+            priority: 0,
+            can_override_official: false,
             pkgs: Default::default(),
         };
 
