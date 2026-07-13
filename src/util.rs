@@ -66,8 +66,8 @@ pub fn split_repo_aur_targets<'a, T: AsTarg>(
                     pick_overlay(config, targ.pkg, &candidates)
                 }
             };
-            let in_official = dbs.pkg(targ.pkg).is_ok()
-                || dbs.find_target_satisfier(targ.pkg).is_some();
+            let in_official =
+                dbs.pkg(targ.pkg).is_ok() || dbs.find_target_satisfier(targ.pkg).is_some();
             if in_official && !candidate.can_override_official {
                 local.push(targ);
             } else {

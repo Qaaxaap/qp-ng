@@ -334,10 +334,18 @@ impl Config {
                 set_op(Op::ManualCtl);
             }
             Arg::Long("mark-provides") => {
-                self.mark_provides = value?.to_string().split(',').map(|s| s.trim().to_string()).collect();
+                self.mark_provides = value?
+                    .to_string()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
             }
             Arg::Long("mark-depends") => {
-                self.mark_depends = value?.to_string().split(',').map(|s| s.trim().to_string()).collect();
+                self.mark_depends = value?
+                    .to_string()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
             }
             Arg::Long("auto-provides") => {
                 self.mark_auto_provides = true;

@@ -223,14 +223,12 @@ pub async fn get_upgrades<'a, 'b>(
         aur_upgrades.retain(|u| !manual_state.is_manually_installed(u.local.name()));
     }
 
-    let repo_upgrades = if config.mode.repo()
-        && config.combined_upgrade
-        && !config.build_official_from_source
-    {
-        repo_upgrades(config)?
-    } else {
-        Vec::new()
-    };
+    let repo_upgrades =
+        if config.mode.repo() && config.combined_upgrade && !config.build_official_from_source {
+            repo_upgrades(config)?
+        } else {
+            Vec::new()
+        };
 
     devel_upgrades.sort();
     devel_upgrades.dedup();

@@ -427,7 +427,12 @@ fn handle_manualctl(config: &mut Config) -> Result<i32> {
             let pkg = &config.targets[i];
             let version = if i + 1 < config.targets.len() {
                 let next = &config.targets[i + 1];
-                if next.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                if next
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                {
                     i += 1;
                     next.as_str()
                 } else {
@@ -447,9 +452,19 @@ fn handle_manualctl(config: &mut Config) -> Result<i32> {
             }
 
             crate::manual::mark_manually_installed(
-                config, pkg, version, &provides, &depends, &mut manual_state,
+                config,
+                pkg,
+                version,
+                &provides,
+                &depends,
+                &mut manual_state,
             )?;
-            println!("{}: {} {}", tr!("marked as manually installed"), pkg, version);
+            println!(
+                "{}: {} {}",
+                tr!("marked as manually installed"),
+                pkg,
+                version
+            );
             if !provides.is_empty() {
                 println!("  provides: {}", provides.join(", "));
             }

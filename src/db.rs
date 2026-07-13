@@ -23,18 +23,11 @@ pub fn create_fake_local_db_entry(
     let pkg_dir = dbpath.join(format!("{}-{}", name, version));
 
     if pkg_dir.exists() {
-        bail!(tr!(
-            "package entry already exists: {}",
-            pkg_dir.display()
-        ));
+        bail!(tr!("package entry already exists: {}", pkg_dir.display()));
     }
 
-    fs::create_dir_all(&pkg_dir).with_context(|| {
-        tr!(
-            "failed to create package directory: {}",
-            pkg_dir.display()
-        )
-    })?;
+    fs::create_dir_all(&pkg_dir)
+        .with_context(|| tr!("failed to create package directory: {}", pkg_dir.display()))?;
 
     // Build desc file in pacman DB format
     let mut desc = String::new();
@@ -89,18 +82,11 @@ pub fn remove_local_db_entry(config: &Config, name: &str, version: &str) -> Resu
     let pkg_dir = dbpath.join(format!("{}-{}", name, version));
 
     if !pkg_dir.exists() {
-        bail!(tr!(
-            "package entry does not exist: {}",
-            pkg_dir.display()
-        ));
+        bail!(tr!("package entry does not exist: {}", pkg_dir.display()));
     }
 
-    fs::remove_dir_all(&pkg_dir).with_context(|| {
-        tr!(
-            "failed to remove package directory: {}",
-            pkg_dir.display()
-        )
-    })?;
+    fs::remove_dir_all(&pkg_dir)
+        .with_context(|| tr!("failed to remove package directory: {}", pkg_dir.display()))?;
 
     Ok(())
 }
@@ -114,9 +100,9 @@ pub fn find_local_db_entries(config: &Config, name: &str) -> Result<Vec<(String,
         return Ok(entries);
     }
 
-    for entry in fs::read_dir(&dbpath).with_context(|| {
-        tr!("failed to read local db directory: {}", dbpath.display())
-    })? {
+    for entry in fs::read_dir(&dbpath)
+        .with_context(|| tr!("failed to read local db directory: {}", dbpath.display()))?
+    {
         let entry = entry?;
         let dir_name = entry.file_name().to_string_lossy().to_string();
         // pacman DB directories use the format <name>-<version>

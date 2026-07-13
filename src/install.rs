@@ -915,10 +915,9 @@ impl Installer {
 
         // Fetch official package PKGBUILDs from Arch GitLab for source-building
         if config.build_official_from_source && !aur_targets.is_empty() {
-            let (official, rest): (Vec<_>, Vec<_>) =
-                aur_targets.into_iter().partition(|t| {
-                    config.alpm.syncdbs().pkg(t.pkg).is_ok()
-                });
+            let (official, rest): (Vec<_>, Vec<_>) = aur_targets
+                .into_iter()
+                .partition(|t| config.alpm.syncdbs().pkg(t.pkg).is_ok());
             aur_targets = rest;
 
             if !official.is_empty() {
@@ -1060,11 +1059,9 @@ impl Installer {
 
         // Filter out packages marked as manually uninstalled
         // to prevent them from being auto-reinstalled as dependencies
-        actions.install.retain(|pkg| {
-            !self
-                .manual_state
-                .is_manually_uninstalled(pkg.pkg.name())
-        });
+        actions
+            .install
+            .retain(|pkg| !self.manual_state.is_manually_uninstalled(pkg.pkg.name()));
 
         debug!("{:#?}", actions);
         let repo_targs = actions
