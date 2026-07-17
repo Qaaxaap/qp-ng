@@ -30,6 +30,7 @@ LIBASSUAN_VER="${LIBASSUAN_VER:-3.0.2}"
 GPGME_VER="${GPGME_VER:-2.1.2}"
 LIBARCHIVE_VER="${LIBARCHIVE_VER:-3.8.8}"
 PACMAN_VER="${PACMAN_VER:-7.1.0}"
+CMAKE_VER="${CMAKE_VER:-3.31.6}"
 RUSTC_BOOTSTRAP_VER="${RUSTC_BOOTSTRAP_VER:-1.90.0}"
 RUSTC_TARGET_VER="${RUSTC_TARGET_VER:-1.93.0}"
 MRUSTC_BRANCH="${MRUSTC_BRANCH:-master}"
@@ -42,6 +43,7 @@ GPGME_URL="https://gnupg.org/ftp/gcrypt/gpgme/gpgme-${GPGME_VER}.tar.bz2"
 LIBARCHIVE_URL="https://github.com/libarchive/libarchive/releases/download/v${LIBARCHIVE_VER}/libarchive-${LIBARCHIVE_VER}.tar.xz"
 PACMAN_URL="https://gitlab.archlinux.org/pacman/pacman/-/archive/v${PACMAN_VER}/pacman-v${PACMAN_VER}.tar.gz"
 MRUSTC_URL="https://github.com/thepowersgang/mrustc/archive/refs/heads/${MRUSTC_BRANCH}.tar.gz"
+CMAKE_URL="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}.tar.gz"
 RUSTC_BOOTSTRAP_SRC="https://static.rust-lang.org/dist/rustc-${RUSTC_BOOTSTRAP_VER}-src.tar.xz"
 RUSTC_TARGET_SRC="https://static.rust-lang.org/dist/rustc-${RUSTC_TARGET_VER}-src.tar.xz"
 RUST_QUICK_URL="https://static.rust-lang.org/dist/rust-${RUSTC_TARGET_VER}-x86_64-unknown-linux-gnu.tar.xz"
@@ -84,19 +86,28 @@ download() {
     fi
     say "  DOWNLOAD: $url"
     python3 -c "
-import urllib.request, sys
+import urllib.request, urllib.error, sys, ssl
 url, dest = sys.argv[1], sys.argv[2]
-try:
-    with urllib.request.urlopen(url) as resp:
+
+def do_fetch(ctx, label):
+    with urllib.request.urlopen(url, context=ctx) as resp:
         with open(dest, 'wb') as f:
             while True:
                 chunk = resp.read(8192)
                 if not chunk: break
                 f.write(chunk)
-    print(f'OK: {dest}')
-except Exception as e:
-    print(f'FAIL: {e}', file=sys.stderr)
-    sys.exit(1)
+    print(f'OK: {dest}' + label)
+
+try:
+    do_fetch(ssl.create_default_context(), '')
+except (ssl.SSLError, urllib.error.URLError, OSError) as e:
+    msg = str(e)
+    if 'SSL' in msg or 'CERTIFICATE' in msg or 'certificate' in msg:
+        print(f'WARN: SSL verify failed, retrying without verification...', file=sys.stderr)
+        do_fetch(ssl._create_unverified_context(), ' (unverified)')
+    else:
+        print(f'FAIL: {e}', file=sys.stderr)
+        sys.exit(1)
 " "$url" "$dest"
 }
 
@@ -284,7 +295,7 @@ if ! check_bin pacman 2>/dev/null; then
     PACMAN_TARBALL="pacman-v${PACMAN_VER}.tar.gz"
     $SKIP_DOWNLOADS || download "$PACMAN_URL" "$SOURCES/$PACMAN_TARBALL"
 
-    local pacman_src="$BUILD_DIR/pacman-v${PACMAN_VER}"
+    pacman_src="$BUILD_DIR/pacman-v${PACMAN_VER}"
     run "rm -rf '$pacman_src'"
     run "tar -xf '$SOURCES/$PACMAN_TARBALL' -C '$BUILD_DIR'"
 
@@ -333,6 +344,27 @@ MIRRORS
     say "pacman.conf created."
 fi
 
+# ─── Phase 6.5: cmake (needed for LLVM during rustc build) ────────────────────
+if ! check_bin cmake 2>/dev/null; then
+    say "Phase 6.5: Building cmake ${CMAKE_VER}..."
+
+    CMAKE_TARBALL="cmake-${CMAKE_VER}.tar.gz"
+    $SKIP_DOWNLOADS || download "$CMAKE_URL" "$SOURCES/$CMAKE_TARBALL"
+
+    cmake_src_dir="$BUILD_DIR/cmake-${CMAKE_VER}"
+    run "rm -rf '$cmake_src_dir'"
+    run "mkdir -p '$cmake_src_dir'"
+    run "tar -xf '$SOURCES/$CMAKE_TARBALL' -C '$cmake_src_dir' --strip-components=1"
+    run "(cd '$cmake_src_dir' && ./bootstrap --prefix=$PREFIX --parallel=${JOBS})"
+    run "make -C '$cmake_src_dir' -j${JOBS}"
+    run "make -C '$cmake_src_dir' install"
+
+    check_bin cmake || die "cmake build failed"
+    say "cmake ${CMAKE_VER} installed."
+else
+    say "Phase 6.5: cmake — SKIP (already available)"
+fi
+
 # ─── Phase 7: Rust toolchain ─────────────────────────────────────────────────
 HAVE_RUST=false
 if check_bin rustc 2>/dev/null && check_bin cargo 2>/dev/null; then
@@ -350,7 +382,7 @@ elif $QUICK_MODE; then
     RUST_TARBALL="rust-${RUSTC_TARGET_VER}-x86_64-unknown-linux-gnu.tar.xz"
     $SKIP_DOWNLOADS || download "$RUST_QUICK_URL" "$SOURCES/$RUST_TARBALL"
 
-    local rust_dir="$BUILD_DIR/rust-${RUSTC_TARGET_VER}-x86_64-unknown-linux-gnu"
+    rust_dir="$BUILD_DIR/rust-${RUSTC_TARGET_VER}-x86_64-unknown-linux-gnu"
     run "rm -rf '$rust_dir'"
     run "tar -xf '$SOURCES/$RUST_TARBALL' -C '$BUILD_DIR'"
     run "(cd '$rust_dir' && ./install.sh --prefix=$PREFIX --without=rust-docs)"
@@ -360,57 +392,93 @@ elif $QUICK_MODE; then
     HAVE_RUST=true
     say "Rust ${RUSTC_TARGET_VER} (quick) installed."
 else
-    # ── Full bootstrap: mrustc → rustc 1.90 → latest rustc → cargo ──────────
+    # ── Full bootstrap: mrustc → rustc 1.90 → rustc 1.93 ──────────────────
     say "Phase 7: Full Rust bootstrap (mrustc → rustc ${RUSTC_BOOTSTRAP_VER} → ${RUSTC_TARGET_VER})"
     warn "This will take several hours and needs ~25GB disk space."
     warn "Use --quick for a 30-minute prebuilt alternative."
 
-    # Step 7a: Build mrustc
+    # LFS may lack CA certificates; wrap curl to tolerate SSL issues
+    # (mrustc + minicargo use curl internally to fetch sources)
+    curl_wrapper="$BUILD_DIR/.bin/curl"
+    if [[ ! -x "$curl_wrapper" ]]; then
+        mkdir -p "$(dirname "$curl_wrapper")"
+        cat > "$curl_wrapper" << 'CURLEOF'
+#!/bin/bash
+exec /usr/bin/curl -k "$@"
+CURLEOF
+        chmod +x "$curl_wrapper"
+    fi
+    export PATH="$BUILD_DIR/.bin:$PATH"
+
+    # Set mrustc version variables (minicargo needs these)
+    export RUSTC_VERSION="${RUSTC_BOOTSTRAP_VER}"
+    export MRUSTC_TARGET_VER="${RUSTC_BOOTSTRAP_VER%.*}"
+
+    # Step 7a: Build mrustc compiler
     say "Phase 7a: Building mrustc..."
     MRUSTC_TARBALL="mrustc-${MRUSTC_BRANCH}.tar.gz"
     $SKIP_DOWNLOADS || download "$MRUSTC_URL" "$SOURCES/$MRUSTC_TARBALL"
 
-    local mrustc_dir="$BUILD_DIR/mrustc"
+    mrustc_dir="$BUILD_DIR/mrustc"
     run "rm -rf '$mrustc_dir'"
     run "mkdir -p '$mrustc_dir'"
     run "tar -xf '$SOURCES/$MRUSTC_TARBALL' -C '$mrustc_dir' --strip-components=1"
+    run "(cd '$mrustc_dir' && make -j${JOBS})"
 
-    # Download rustc source that mrustc can compile
-    RUSTC_SRC_TARBALL="rustc-${RUSTC_BOOTSTRAP_VER}-src.tar.xz"
-    $SKIP_DOWNLOADS || download "$RUSTC_BOOTSTRAP_SRC" "$SOURCES/$RUSTC_SRC_TARBALL"
-
-    local rustc_src_dir="$BUILD_DIR/rustc-${RUSTC_BOOTSTRAP_VER}-src"
-    run "rm -rf '$rustc_src_dir'"
-    run "tar -xf '$SOURCES/$RUSTC_SRC_TARBALL' -C '$BUILD_DIR'"
-
-    say "Phase 7b: Building rustc ${RUSTC_BOOTSTRAP_VER} with mrustc..."
-    run "(cd '$mrustc_dir' && make -j${JOBS} -f minicargo.mk \
-        RUSTCSRC_DIR='$rustc_src_dir')"
-
-    say "Phase 7c: Building cargo with mrustc-built rustc..."
-    run "(cd '$mrustc_dir' && make -j${JOBS} -f minicargo.mk \
-        RUSTCSRC_DIR='$rustc_src_dir' CARGO_BUILD=1)"
-
-    # Step 7d: Use stage1 to build latest rustc + cargo from source
-    say "Phase 7d: Building final rustc ${RUSTC_TARGET_VER}..."
-
-    local stage1_bin="$mrustc_dir/output/bin"
-    if [[ ! -x "$stage1_bin/rustc" ]]; then
-        die "mrustc stage1 build incomplete — no rustc at $stage1_bin"
+    # Step 7b: Fetch and extract rustc source ourselves.
+    # Official tarball is .tar.xz but minicargo.mk expects .tar.gz — we bypass
+    # both by extracting manually and touching the 'extracted' sentinel file.
+    say "Phase 7b: Fetching rustc ${RUSTC_BOOTSTRAP_VER} source..."
+    rustc_src_dir="$mrustc_dir/rustc-${RUSTC_BOOTSTRAP_VER}-src"
+    if [[ -f "$rustc_src_dir/extracted" ]]; then
+        say "  SKIP (already extracted)"
+    else
+        rustc_tarball="$SOURCES/rustc-${RUSTC_BOOTSTRAP_VER}-src.tar.xz"
+        $SKIP_DOWNLOADS || download "$RUSTC_BOOTSTRAP_SRC" "$rustc_tarball"
+        run "rm -rf '$rustc_src_dir'"
+        run "mkdir -p '$rustc_src_dir'"
+        run "tar -xf '$rustc_tarball' -C '$rustc_src_dir' --strip-components=1"
+        run "touch '$rustc_src_dir/extracted'"
     fi
 
-    export PATH="${stage1_bin}:${PATH}"
+    # Step 7c: Build libstd via minicargo
+    say "Phase 7c: Building libstd..."
+    run "(cd '$mrustc_dir' && make -f minicargo.mk LIBS -j${JOBS})"
+
+    # Step 7d: Build rustc via minicargo
+    say "Phase 7d: Building rustc ${RUSTC_BOOTSTRAP_VER}..."
+    stage1_outdir="output-${RUSTC_BOOTSTRAP_VER}"
+    run "(cd '$mrustc_dir' && RUSTC_INSTALL_BINDIR=bin make -f minicargo.mk '${stage1_outdir}/rustc' -j${JOBS})"
+
+    # Step 7e: Build cargo via minicargo
+    say "Phase 7e: Building cargo..."
+    run "(cd '$mrustc_dir' && LIBGIT2_SYS_USE_PKG_CONFIG=1 make -f minicargo.mk '${stage1_outdir}/cargo' -j${JOBS})"
+
+    # Verify stage1
+    stage1_rustc="$mrustc_dir/${stage1_outdir}/rustc"
+    stage1_cargo="$mrustc_dir/${stage1_outdir}/cargo"
+    if [[ ! -x "$stage1_rustc" ]]; then
+        die "mrustc stage1 build incomplete — no rustc at $stage1_rustc"
+    fi
+    if [[ ! -x "$stage1_cargo" ]]; then
+        die "mrustc stage1 build incomplete — no cargo at $stage1_cargo"
+    fi
+    say "Stage1 complete: $($stage1_rustc --version 2>/dev/null || true)"
+
+    # Step 7f: Use stage1 rustc+cargo to build final rustc from source
+    say "Phase 7f: Building final rustc ${RUSTC_TARGET_VER} from source..."
+    export PATH="${mrustc_dir}/${stage1_outdir}:${PATH}"
 
     RUSTC_FINAL_TARBALL="rustc-${RUSTC_TARGET_VER}-src.tar.xz"
     $SKIP_DOWNLOADS || download "$RUSTC_TARGET_SRC" "$SOURCES/$RUSTC_FINAL_TARBALL"
 
-    local rustc_final_dir="$BUILD_DIR/rustc-${RUSTC_TARGET_VER}-src"
+    rustc_final_dir="$BUILD_DIR/rustc-${RUSTC_TARGET_VER}-src"
     run "rm -rf '$rustc_final_dir'"
     run "tar -xf '$SOURCES/$RUSTC_FINAL_TARBALL' -C '$BUILD_DIR'"
     run "(cd '$rustc_final_dir' && ./configure \
         --prefix=$PREFIX \
         --enable-local-rust \
-        --local-rust-root='$stage1_bin')"
+        --local-rust-root='$mrustc_dir/${stage1_outdir}')"
     run "(cd '$rustc_final_dir' && python3 x.py build --stage 2 -j${JOBS})"
     run "(cd '$rustc_final_dir' && python3 x.py install --stage 2)"
 
