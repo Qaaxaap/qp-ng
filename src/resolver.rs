@@ -50,7 +50,7 @@ pub fn flags(config: &mut Config) -> aur_depends::Flags {
     if config.interactive {
         flags.remove(Flags::TARGET_PROVIDES);
     }
-    if config.repos != LocalRepos::None || config.rebuild == YesNoAllTree::Tree || config.chroot {
+    if config.repos != LocalRepos::None || config.rebuild == YesNoAllTree::Tree || config.chroot || config.build_official_from_source {
         flags |= Flags::RESOLVE_SATISFIED_PKGBUILDS;
     }
 

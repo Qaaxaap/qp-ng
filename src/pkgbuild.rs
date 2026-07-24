@@ -135,21 +135,37 @@ impl PkgbuildRepo {
 
     pub fn from_pkgbuilds(config: &Config, dirs: &[PathBuf]) -> Result<PkgbuildRepo> {
         let mut pkgs = Vec::new();
-        let mut repo = Self::from_cwd(config)?;
+        let c = config.color;
 
         for dir in dirs {
             let dir = dir.canonicalize()?;
-            repo.print_generate_srcinfo(config, &dir.file_name().unwrap().to_string_lossy());
+            println!(
+                "{} {}",
+                c.action.paint("::"),
+                c.bold.paint(tr!(
+                    "Generating .SRCINFO for {}...",
+                    dir.file_name().unwrap().to_string_lossy(),
+                )),
+            );
             let srcinfo = read_srcinfo_from_pkgbuild(config, &dir)?;
             pkgs.push(PkgbuildPkg {
-                repo: repo.name.clone(),
+                repo: "official".to_string(),
                 srcinfo,
                 path: dir.clone(),
             });
         }
 
-        repo.pkgs = OnceCell::from(Arc::new(pkgs));
-        Ok(repo)
+        Ok(PkgbuildRepo {
+            name: "official".to_string(),
+            source: RepoSource::None,
+            depth: 0,
+            skip_review: true,
+            force_srcinfo: false,
+            path: PathBuf::new(),
+            priority: 0,
+            can_override_official: true,
+            pkgs: OnceCell::from(Arc::new(pkgs)),
+        })
     }
 
     fn read_pkgs(&self, config: &Config) -> Vec<PkgbuildPkg> {

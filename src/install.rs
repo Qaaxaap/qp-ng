@@ -913,7 +913,9 @@ impl Installer {
         let targets = args::parse_targets(targets_str);
         let (mut repo_targets, mut aur_targets) = split_repo_aur_targets(config, &targets)?;
 
-        // Fetch official package PKGBUILDs from Arch GitLab for source-building
+        // Source-first official packages: clone PKGBUILDs from Arch GitLab,
+        // show them to the user for review, and build from source on
+        // confirmation.  No binary fallback — the user chose source-first.
         if config.build_official_from_source && !aur_targets.is_empty() {
             let (official, rest): (Vec<_>, Vec<_>) = aur_targets
                 .into_iter()
@@ -923,11 +925,122 @@ impl Installer {
             if !official.is_empty() {
                 let clone_base = config.fetch.clone_dir.join("official");
                 std::fs::create_dir_all(&clone_base)?;
-                let prev_dir = std::env::current_dir()?;
-                std::env::set_current_dir(&clone_base)?;
-                let _ = download::repo_pkgbuilds(config, &official);
-                std::env::set_current_dir(&prev_dir)?;
+                let c = config.color;
+                let git_bin = config.git_bin.clone();
+                let gitlab_url = config.official_gitlab_url.clone();
 
+                use std::io::{stdin, stdout, BufRead, Write};
+
+                for (n, targ) in official.iter().enumerate() {
+                    let Ok(pkg) = config.alpm.syncdbs().find_target(*targ) else {
+                        continue;
+                    };
+                    let base = pkg.base().unwrap_or_else(|| pkg.name());
+                    let pkg_dir = clone_base.join(base);
+                    let pkgbuild_path = pkg_dir.join("PKGBUILD");
+
+                    // Clone from Arch GitLab if not already present
+                    if !pkgbuild_path.exists() {
+                        download::print_download(config, n + 1, official.len(), base);
+
+                        let url = format!("{}/{}.git", gitlab_url, base);
+                        let mut cmd = std::process::Command::new(&git_bin);
+                        cmd.arg("clone").arg("--depth=1");
+
+                        // git reads GIT_SSL_CAINFO, not SSL_CERT_FILE — map it
+                        if let Ok(ca) = std::env::var("SSL_CERT_FILE") {
+                            cmd.env("GIT_SSL_CAINFO", ca);
+                        }
+                        let status = cmd
+                            .arg(&url)
+                            .arg(&pkg_dir)
+                            .status();
+
+                        match status {
+                            Ok(s) if s.success() => {}
+                            Ok(s) => {
+                                eprintln!(
+                                    "{} {}",
+                                    c.error.paint("error:"),
+                                    tr!("git clone failed for {} (exit {})", base, s.code().unwrap_or(-1)),
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{} {}",
+                                    c.error.paint("error:"),
+                                    tr!("failed to run git for {}: {}", base, e),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Show PKGBUILD and ask for confirmation
+                    let content = match std::fs::read_to_string(&pkgbuild_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!(
+                                "{} {}",
+                                c.error.paint("error:"),
+                                tr!("failed to read PKGBUILD for {}: {}", base, e),
+                            );
+                            continue;
+                        }
+                    };
+
+                    println!();
+                    println!(
+                        "{} {} {}",
+                        c.action.paint("::"),
+                        c.bold.paint(tr!("PKGBUILD for")),
+                        c.bold.paint(base),
+                    );
+                    println!("───");
+                    print!("{}", content);
+                    println!("───");
+
+                    if config.no_confirm {
+                        println!(
+                            "  {} {}",
+                            c.action.paint("->"),
+                            tr!("building {} from source", base),
+                        );
+                        aur_targets.push(*targ);
+                    } else {
+                        print!(
+                            "{} {} [Y/n] ",
+                            c.action.paint("::"),
+                            c.bold.paint(tr!("Build {} from source?", base)),
+                        );
+                        let _ = stdout().lock().flush();
+
+                        let mut input = String::new();
+                        let _ = stdin().lock().read_line(&mut input);
+                        match input.trim().to_lowercase().as_str() {
+                            "n" | "no" => {
+                                println!(
+                                    "  {} {}  → {}",
+                                    c.warning.paint("->"),
+                                    tr!("skipping {}", base),
+                                    pkg_dir.display(),
+                                );
+                            }
+                            _ => {
+                                println!(
+                                    "  {} {}",
+                                    c.action.paint("->"),
+                                    tr!("building {} from source", base),
+                                );
+                                aur_targets.push(*targ);
+                            }
+                        }
+                    }
+                }
+
+                // Register cloned dirs as a PkgbuildRepo so the resolver
+                // can find them during dependency resolution.
                 let dirs: Vec<PathBuf> = std::fs::read_dir(&clone_base)
                     .into_iter()
                     .flatten()

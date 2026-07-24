@@ -25,18 +25,21 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 # Versions — bump these as needed
 CURL_VER="${CURL_VER:-8.17.0}"
+GIT_VER="${GIT_VER:-2.51.0}"
 LIBGPG_ERROR_VER="${LIBGPG_ERROR_VER:-1.55}"
 LIBASSUAN_VER="${LIBASSUAN_VER:-3.0.2}"
 GPGME_VER="${GPGME_VER:-2.1.2}"
 LIBARCHIVE_VER="${LIBARCHIVE_VER:-3.8.8}"
 PACMAN_VER="${PACMAN_VER:-7.1.0}"
 CMAKE_VER="${CMAKE_VER:-3.31.6}"
+SUDO_VER="${SUDO_VER:-1.9.16p2}"
 RUSTC_BOOTSTRAP_VER="${RUSTC_BOOTSTRAP_VER:-1.90.0}"
 RUSTC_TARGET_VER="${RUSTC_TARGET_VER:-1.93.0}"
 MRUSTC_BRANCH="${MRUSTC_BRANCH:-master}"
 
 # URLs
 CURL_URL="https://curl.se/download/curl-${CURL_VER}.tar.xz"
+GIT_URL="https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VER}.tar.gz"
 LIBGPG_ERROR_URL="https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-${LIBGPG_ERROR_VER}.tar.bz2"
 LIBASSUAN_URL="https://gnupg.org/ftp/gcrypt/libassuan/libassuan-${LIBASSUAN_VER}.tar.bz2"
 GPGME_URL="https://gnupg.org/ftp/gcrypt/gpgme/gpgme-${GPGME_VER}.tar.bz2"
@@ -44,6 +47,7 @@ LIBARCHIVE_URL="https://github.com/libarchive/libarchive/releases/download/v${LI
 PACMAN_URL="https://gitlab.archlinux.org/pacman/pacman/-/archive/v${PACMAN_VER}/pacman-v${PACMAN_VER}.tar.gz"
 MRUSTC_URL="https://github.com/thepowersgang/mrustc/archive/refs/heads/${MRUSTC_BRANCH}.tar.gz"
 CMAKE_URL="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}.tar.gz"
+SUDO_URL="https://www.sudo.ws/dist/sudo-${SUDO_VER}.tar.gz"
 RUSTC_BOOTSTRAP_SRC="https://static.rust-lang.org/dist/rustc-${RUSTC_BOOTSTRAP_VER}-src.tar.xz"
 RUSTC_TARGET_SRC="https://static.rust-lang.org/dist/rustc-${RUSTC_TARGET_VER}-src.tar.xz"
 RUST_QUICK_URL="https://static.rust-lang.org/dist/rust-${RUSTC_TARGET_VER}-x86_64-unknown-linux-gnu.tar.xz"
@@ -52,6 +56,7 @@ RUST_QUICK_URL="https://static.rust-lang.org/dist/rust-${RUSTC_TARGET_VER}-x86_6
 DRY_RUN=false
 QUICK_MODE=false
 SKIP_DOWNLOADS=false
+CLEAN_BUILD=false
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 GREEN='\033[1;32m'
@@ -144,9 +149,10 @@ while [[ $# -gt 0 ]]; do
         --dry-run)        DRY_RUN=true; shift ;;
         --quick)          QUICK_MODE=true; shift ;;
         --skip-downloads) SKIP_DOWNLOADS=true; shift ;;
+        --clean)          CLEAN_BUILD=true; shift ;;
         --prefix=*)       PREFIX="${1#*=}"; shift ;;
         --help|-h)
-            echo "Usage: $0 [--quick] [--dry-run] [--skip-downloads] [--prefix=PATH]"
+            echo "Usage: $0 [--quick] [--dry-run] [--skip-downloads] [--clean] [--prefix=PATH]"
             echo ""
             echo "Bootstrap qp-ng on an LFS 13.0 (systemd) system."
             echo "Only base LFS packages are assumed present. Everything else is built."
@@ -154,11 +160,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --quick           Use official Rust bootstrap (fast, download binary)"
             echo "  --dry-run         Show what would be done without doing it"
             echo "  --skip-downloads  All source tarballs are already in \$SOURCES dir"
+            echo "  --clean           Remove existing build dirs before building (forces rebuild)"
             echo "  --prefix=PATH     Install prefix (default: /usr)"
             echo ""
             echo "Full bootstrap order:"
-            echo "  curl → libgpg-error → libassuan → gpgme → libarchive → pacman"
-            echo "  → mrustc → rustc ${RUSTC_BOOTSTRAP_VER} → rustc ${RUSTC_TARGET_VER} → cargo → qp-ng"
+            echo "  curl → git → libgpg-error → libassuan → gpgme → libarchive → pacman"
+            echo "  → cmake → sudo → mrustc → rustc ${RUSTC_BOOTSTRAP_VER} → rustc ${RUSTC_TARGET_VER} → cargo → qp-ng"
             echo ""
             echo "Expected time (full): 5-9 hours. With --quick: ~30 minutes."
             exit 0
@@ -204,6 +211,46 @@ say "Build dir:    $BUILD_DIR"
 say "Install dir:  $PREFIX"
 $DRY_RUN && say "(dry-run — nothing actually built)"
 
+# ─── Phase 0.5: CA certificates ──────────────────────────────────────────────
+# LFS has no CA certs by default. Without them, every HTTPS tool (curl, cargo,
+# git) fails with SSL errors. The curl project distributes a single-file bundle
+# of Mozilla's CA certificates that works with both OpenSSL and libgit2 (cargo).
+CERT_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+if [[ ! -f "$CERT_BUNDLE" ]]; then
+    say "Phase 0.5: Installing CA certificates..."
+    CACERT_URL="https://curl.se/ca/cacert.pem"
+    $SKIP_DOWNLOADS || download "$CACERT_URL" "$SOURCES/cacert.pem"
+    run "mkdir -p /etc/ssl/certs"
+    run "install -Dm644 '$SOURCES/cacert.pem' '$CERT_BUNDLE'"
+    say "CA certificates installed to $CERT_BUNDLE"
+else
+    say "Phase 0.5: CA certificates — SKIP ($CERT_BUNDLE exists)"
+fi
+
+# Export for the current script process (children like curl/cargo/git inherit these)
+export SSL_CERT_FILE="$CERT_BUNDLE"
+export CURL_CA_BUNDLE="$CERT_BUNDLE"
+export GIT_SSL_CAINFO="$CERT_BUNDLE"
+
+# Persist for future shells and system services.  Without this, pacman, git,
+# (or any other tool started outside this script) falls back to each library's
+# compiled-in default CA path, which on LFS either does not exist or is empty.
+PROFILE_D="/etc/profile.d"
+if [[ ! -f "$PROFILE_D/ssl-certs.sh" ]]; then
+    run "mkdir -p '$PROFILE_D'"
+    cat > "$PROFILE_D/ssl-certs.sh" <<'PROFEOF'
+# CA certificate bundle — installed by qp-ng bootstrap
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+PROFEOF
+    run "chmod 644 '$PROFILE_D/ssl-certs.sh'"
+    say "Wrote $PROFILE_D/ssl-certs.sh for persistent CA configuration"
+fi
+
+# Source it now so the current (non-login) shell also picks it up
+source "$PROFILE_D/ssl-certs.sh" 2>/dev/null || true
+
 # ─── Phase 1: curl ───────────────────────────────────────────────────────────
 # pacman needs libcurl for HTTP downloads. LFS base has no curl/wget.
 if ! check_bin curl 2>/dev/null; then
@@ -213,13 +260,30 @@ if ! check_bin curl 2>/dev/null; then
     $SKIP_DOWNLOADS || download "$CURL_URL" "$SOURCES/$CURL_TARBALL"
 
     build_autotools "curl-${CURL_VER}" "$CURL_TARBALL" \
-        --with-openssl --without-libpsl --disable-ldap --disable-static
+        --with-openssl --with-ca-bundle="$CERT_BUNDLE" --without-libpsl --disable-ldap --disable-static
 
     run "ldconfig 2>/dev/null || true"
     check_bin curl || die "curl build failed"
     say "curl ${CURL_VER} installed."
 else
     say "Phase 1: curl — SKIP (already available)"
+fi
+
+# ─── Phase 1.5: git ─────────────────────────────────────────────────────────
+# qp-ng uses pkgctl to clone PKGBUILDs from Arch GitLab; pkgctl needs git.
+# LFS base has no git, and we want it built from source anyway.
+if ! check_bin git 2>/dev/null; then
+    say "Phase 1.5: Building git ${GIT_VER}..."
+
+    GIT_TARBALL="git-${GIT_VER}.tar.gz"
+    $SKIP_DOWNLOADS || download "$GIT_URL" "$SOURCES/$GIT_TARBALL"
+
+    build_autotools "git-${GIT_VER}" "$GIT_TARBALL" --with-curl
+
+    check_bin git || die "git build failed"
+    say "git ${GIT_VER} installed."
+else
+    say "Phase 1.5: git — SKIP (already available)"
 fi
 
 # ─── Phase 2: libgpg-error ───────────────────────────────────────────────────
@@ -324,8 +388,8 @@ if [[ ! -f /etc/pacman.conf ]] && ! $DRY_RUN; then
 [options]
 HoldPkg     = pacman glibc
 Architecture = auto
-SigLevel    = Optional
-LocalFileSigLevel = Optional
+SigLevel    = Never
+LocalFileSigLevel = Never
 
 [core]
 Include = /etc/pacman.d/mirrorlist-arch
@@ -363,6 +427,34 @@ if ! check_bin cmake 2>/dev/null; then
     say "cmake ${CMAKE_VER} installed."
 else
     say "Phase 6.5: cmake — SKIP (already available)"
+fi
+
+# ─── Phase 6.6: sudo ──────────────────────────────────────────────────
+# LFS doesn't ship sudo in Chapter 8.  We build it from source because
+# installing the Arch sudo package via pacman would overwrite LFS-built
+# base system files (pam, glibc config, etc.).
+if ! check_bin sudo 2>/dev/null; then
+    say "Phase 6.6: Building sudo ${SUDO_VER}..."
+
+    SUDO_TARBALL="sudo-${SUDO_VER}.tar.gz"
+    $SKIP_DOWNLOADS || download "$SUDO_URL" "$SOURCES/$SUDO_TARBALL"
+
+    sudo_src_dir="$BUILD_DIR/sudo-${SUDO_VER}"
+    run "rm -rf '$sudo_src_dir'"
+    run "mkdir -p '$sudo_src_dir'"
+    run "tar -xf '$SOURCES/$SUDO_TARBALL' -C '$sudo_src_dir' --strip-components=1"
+    run "(cd '$sudo_src_dir' && ./configure --prefix=/usr \
+        --with-rundir=/run/sudo \
+        --with-logging=syslog \
+        --with-env-editor \
+        --without-lecture)"
+    run "make -C '$sudo_src_dir' -j${JOBS}"
+    run "make -C '$sudo_src_dir' install"
+
+    check_bin sudo || die "sudo build failed"
+    say "sudo ${SUDO_VER} installed."
+else
+    say "Phase 6.6: sudo — SKIP (already available)"
 fi
 
 # ─── Phase 7: Rust toolchain ─────────────────────────────────────────────────
@@ -420,9 +512,20 @@ CURLEOF
     $SKIP_DOWNLOADS || download "$MRUSTC_URL" "$SOURCES/$MRUSTC_TARBALL"
 
     mrustc_dir="$BUILD_DIR/mrustc"
-    run "rm -rf '$mrustc_dir'"
-    run "mkdir -p '$mrustc_dir'"
-    run "tar -xf '$SOURCES/$MRUSTC_TARBALL' -C '$mrustc_dir' --strip-components=1"
+
+    # Extract mrustc (skip if already present)
+    if $CLEAN_BUILD; then
+        run "rm -rf '$mrustc_dir'"
+    fi
+    if [[ -f "$mrustc_dir/Makefile" ]]; then
+        say "  SKIP extract (source already present, use --clean to force)"
+    else
+        run "rm -rf '$mrustc_dir'"
+        run "mkdir -p '$mrustc_dir'"
+        run "tar -xf '$SOURCES/$MRUSTC_TARBALL' -C '$mrustc_dir' --strip-components=1"
+    fi
+
+    # Build mrustc (make is incremental)
     run "(cd '$mrustc_dir' && make -j${JOBS})"
 
     # Step 7b: Fetch and extract rustc source ourselves.
@@ -473,13 +576,36 @@ CURLEOF
     $SKIP_DOWNLOADS || download "$RUSTC_TARGET_SRC" "$SOURCES/$RUSTC_FINAL_TARBALL"
 
     rustc_final_dir="$BUILD_DIR/rustc-${RUSTC_TARGET_VER}-src"
-    run "rm -rf '$rustc_final_dir'"
-    run "tar -xf '$SOURCES/$RUSTC_FINAL_TARBALL' -C '$BUILD_DIR'"
-    run "(cd '$rustc_final_dir' && ./configure \
-        --prefix=$PREFIX \
-        --enable-local-rust \
-        --local-rust-root='$mrustc_dir/${stage1_outdir}')"
-    run "(cd '$rustc_final_dir' && python3 x.py build --stage 2 -j${JOBS})"
+
+    # ── Extract (skip if already present) ──
+    if $CLEAN_BUILD; then
+        run "rm -rf '$rustc_final_dir'"
+    fi
+    if [[ -f "$rustc_final_dir/x.py" ]]; then
+        say "  SKIP extract (source already present, use --clean to force)"
+    else
+        run "rm -rf '$rustc_final_dir'"
+        run "tar -xf '$SOURCES/$RUSTC_FINAL_TARBALL' -C '$BUILD_DIR'"
+    fi
+
+    # ── Configure (skip if config.toml already exists) ──
+    if [[ -f "$rustc_final_dir/config.toml" ]]; then
+        say "  SKIP configure (config.toml already exists, use --clean to force)"
+    else
+        run "(cd '$rustc_final_dir' && ./configure \
+            --prefix=$PREFIX \
+            --enable-local-rust \
+            --local-rust-root='$mrustc_dir/${stage1_outdir}')"
+    fi
+
+    # ── Build (resume from last checkpoint — x.py is incremental) ──
+    if [[ -f "$rustc_final_dir/build/x86_64-unknown-linux-gnu/stage2/bin/rustc" ]] && ! $CLEAN_BUILD; then
+        say "  SKIP build (stage2 rustc already built, use --clean to force)"
+    else
+        run "(cd '$rustc_final_dir' && python3 x.py build --stage 2 -j${JOBS})"
+    fi
+
+    # ── Install (always run, fast and idempotent) ──
     run "(cd '$rustc_final_dir' && python3 x.py install --stage 2)"
 
     check_bin rustc || die "Final rustc build failed"

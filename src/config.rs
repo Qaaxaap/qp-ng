@@ -488,6 +488,8 @@ pub struct Config {
     pub sudo_bin: String,
     #[default = "pkgctl"]
     pub pkgctl_bin: String,
+    #[default = "https://gitlab.archlinux.org/archlinux/packaging/packages"]
+    pub official_gitlab_url: String,
     #[default = "bat"]
     pub bat_bin: String,
     pub fm: Option<String>,
@@ -1033,6 +1035,7 @@ then initialise it with:
             "PacmanConf" => self.pacman_conf_bin = Some(value),
             "Git" => self.git_bin = value,
             "Pkgctl" => self.pkgctl_bin = value,
+            "OfficialGitLabUrl" => self.official_gitlab_url = value.to_string(),
             "Gpg" => self.gpg_bin = value,
             "Sudo" => self.sudo_bin = value,
             "Pager" => self.pager_cmd = Some(value),
