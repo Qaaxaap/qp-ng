@@ -26,14 +26,19 @@ use crate::util::{ask, repo_aur_pkgs, split_repo_aur_targets};
 use crate::{args, exec, news, print_error, printtr, repo};
 
 use alpm::{Alpm, Depend, Version};
+fn dep_pkgname(dep: &str) -> &str {
+    dep.split(|c: char| matches!(c, '=' | '<' | '>'))
+        .next()
+        .unwrap_or(dep)
+}
 use alpm_utils::depends::{satisfies, satisfies_nover, satisfies_provide, satisfies_provide_nover};
 use alpm_utils::{DbListExt, Targ};
+use srcinfo::{ArchVecs, Srcinfo};
 use ansiterm::Style;
 use anyhow::{bail, ensure, Context, Result};
 use aur_depends::{Actions, Base, Conflict, DepMissing, RepoPackage};
 use log::debug;
 use raur::Cache;
-use srcinfo::{ArchVecs, Srcinfo};
 use tr::tr;
 
 #[derive(Copy, Clone, Debug)]
@@ -911,6 +916,17 @@ impl Installer {
         config.args.targets = config.targets.clone();
 
         let targets = args::parse_targets(targets_str);
+
+        config.init_alpm()?;
+
+        if self.refresh != 0 {
+            config.pkgbuild_repos.refresh(config)?;
+            for repo in &mut config.pkgbuild_repos.repos {
+                repo.invalidate_cache();
+            }
+            self.done_something = true;
+        }
+
         let (mut repo_targets, mut aur_targets) = split_repo_aur_targets(config, &targets)?;
 
         // Source-first official packages: clone PKGBUILDs from Arch GitLab,
@@ -931,51 +947,62 @@ impl Installer {
 
                 use std::io::{stdin, stdout, BufRead, Write};
 
+                let mut accepted: Vec<Targ<'_>> = Vec::new();
+
                 for (n, targ) in official.iter().enumerate() {
                     let Ok(pkg) = config.alpm.syncdbs().find_target(*targ) else {
                         continue;
                     };
                     let base = pkg.base().unwrap_or_else(|| pkg.name());
-                    let pkg_dir = clone_base.join(base);
-                    let pkgbuild_path = pkg_dir.join("PKGBUILD");
 
-                    // Clone from Arch GitLab if not already present
-                    if !pkgbuild_path.exists() {
-                        download::print_download(config, n + 1, official.len(), base);
+                    // If an overlay provides this package, use the overlay
+                    // PKGBUILD instead of cloning from Arch GitLab.
+                    let pkgbuild_path = if let Some((pp, _)) =
+                        config.pkgbuild_repos.pkg(config, targ.pkg)
+                    {
+                        pp.path.join("PKGBUILD")
+                    } else {
+                        let pkg_dir = clone_base.join(base);
+                        let path = pkg_dir.join("PKGBUILD");
 
-                        let url = format!("{}/{}.git", gitlab_url, base);
-                        let mut cmd = std::process::Command::new(&git_bin);
-                        cmd.arg("clone").arg("--depth=1");
+                        if !path.exists() {
+                            download::print_download(config, n + 1, official.len(), base);
 
-                        // git reads GIT_SSL_CAINFO, not SSL_CERT_FILE — map it
-                        if let Ok(ca) = std::env::var("SSL_CERT_FILE") {
-                            cmd.env("GIT_SSL_CAINFO", ca);
-                        }
-                        let status = cmd
-                            .arg(&url)
-                            .arg(&pkg_dir)
-                            .status();
+                            let url = format!("{}/{}.git", gitlab_url, base);
+                            let mut cmd = std::process::Command::new(&git_bin);
+                            cmd.arg("clone").arg("--depth=1");
 
-                        match status {
-                            Ok(s) if s.success() => {}
-                            Ok(s) => {
-                                eprintln!(
-                                    "{} {}",
-                                    c.error.paint("error:"),
-                                    tr!("git clone failed for {} (exit {})", base, s.code().unwrap_or(-1)),
-                                );
-                                continue;
+                            // git reads GIT_SSL_CAINFO, not SSL_CERT_FILE — map it
+                            if let Ok(ca) = std::env::var("SSL_CERT_FILE") {
+                                cmd.env("GIT_SSL_CAINFO", ca);
                             }
-                            Err(e) => {
-                                eprintln!(
-                                    "{} {}",
-                                    c.error.paint("error:"),
-                                    tr!("failed to run git for {}: {}", base, e),
-                                );
-                                continue;
+                            let status = cmd
+                                .arg(&url)
+                                .arg(&pkg_dir)
+                                .status();
+
+                            match status {
+                                Ok(s) if s.success() => {}
+                                Ok(s) => {
+                                    eprintln!(
+                                        "{} {}",
+                                        c.error.paint("error:"),
+                                        tr!("git clone failed for {} (exit {})", base, s.code().unwrap_or(-1)),
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "{} {}",
+                                        c.error.paint("error:"),
+                                        tr!("failed to run git for {}: {}", base, e),
+                                    );
+                                    continue;
+                                }
                             }
                         }
-                    }
+                        path
+                    };
 
                     // Show PKGBUILD and ask for confirmation
                     let content = match std::fs::read_to_string(&pkgbuild_path) {
@@ -1008,6 +1035,7 @@ impl Installer {
                             tr!("building {} from source", base),
                         );
                         aur_targets.push(*targ);
+                        accepted.push(*targ);
                     } else {
                         print!(
                             "{} {} [Y/n] ",
@@ -1024,7 +1052,7 @@ impl Installer {
                                     "  {} {}  → {}",
                                     c.warning.paint("->"),
                                     tr!("skipping {}", base),
-                                    pkg_dir.display(),
+                                    pkgbuild_path.display(),
                                 );
                             }
                             _ => {
@@ -1034,24 +1062,156 @@ impl Installer {
                                     tr!("building {} from source", base),
                                 );
                                 aur_targets.push(*targ);
+                                accepted.push(*targ);
                             }
                         }
                     }
                 }
 
-                // Register cloned dirs as a PkgbuildRepo so the resolver
-                // can find them during dependency resolution.
-                let dirs: Vec<PathBuf> = std::fs::read_dir(&clone_base)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                    .map(|e| e.path())
-                    .filter(|p| p.join("PKGBUILD").exists())
-                    .collect();
+                // Recursively clone official-repo dependencies using
+                // ALPM syncdb pkg.depends() for the transitive closure
+                // (NOT SRCINFO, which would pull in makedepends→explosion).
+                // The resolver later discovers makedepends from each
+                // registered PKGBUILD's SRCINFO and resolves them through
+                // the pkgbuild repo — following paru's AUR pattern.
+                let mut visited: HashSet<String> = HashSet::new();
+                let mut to_clone: Vec<(String, PathBuf)> = Vec::new();
+                let mut all_dirs: Vec<PathBuf> = Vec::new();
 
-                if !dirs.is_empty() {
-                    match PkgbuildRepo::from_pkgbuilds(config, &dirs) {
+                // Seed: accepted targets
+                let mut queue: Vec<String> = Vec::new();
+                for targ in &accepted {
+                    if let Some((pp, _)) = config.pkgbuild_repos.pkg(config, targ.pkg) {
+                        let base = pp.srcinfo.base.pkgbase.clone();
+                        if visited.insert(base.clone())
+                            && pp.path.join("PKGBUILD").exists()
+                        {
+                            all_dirs.push(pp.path.clone());
+                            queue.push(base);
+                        }
+                        continue;
+                    }
+                    let Ok(pkg) = config.alpm.syncdbs().find_target(*targ) else {
+                        continue;
+                    };
+                    let base = pkg.base().unwrap_or_else(|| pkg.name());
+                    if visited.insert(base.to_string()) {
+                        let dir = clone_base.join(base);
+                        if dir.join("PKGBUILD").exists() {
+                            all_dirs.push(dir);
+                        } else {
+                            to_clone.push((base.to_string(), dir.clone()));
+                        }
+                        queue.push(base.to_string());
+                    }
+                }
+
+                // BFS: only follow syncdb pkg.depends() — runtime deps,
+                // not makedepends.  The resolver discovers makedepends
+                // from registered SRCINFOs during resolution.
+                while let Some(pkgname) = queue.pop() {
+                    // Collect deps from syncdb (runtime only, no explosion)
+                    let Ok(pkg) = config.alpm.syncdbs().pkg(pkgname.as_str()) else {
+                        continue;
+                    };
+                    for dep in pkg.depends() {
+                        let dep_name = dep_pkgname(dep.name());
+                        if visited.contains(dep_name) {
+                            continue;
+                        }
+                        // Overlay first
+                        if let Some((pp, _)) =
+                            config.pkgbuild_repos.pkg(config, dep_name)
+                        {
+                            let base = pp.srcinfo.base.pkgbase.clone();
+                            if visited.insert(base.clone())
+                                && pp.path.join("PKGBUILD").exists()
+                            {
+                                all_dirs.push(pp.path.clone());
+                                queue.push(base);
+                            }
+                            continue;
+                        }
+                        let Ok(dep_pkg) = config.alpm.syncdbs().pkg(dep_name) else {
+                            continue;
+                        };
+                        let base = dep_pkg
+                            .base()
+                            .unwrap_or_else(|| dep_pkg.name())
+                            .to_string();
+                        if !visited.insert(base.clone()) {
+                            continue;
+                        }
+                        let dep_dir = clone_base.join(&base);
+                        if dep_dir.join("PKGBUILD").exists() {
+                            all_dirs.push(dep_dir);
+                        } else {
+                            to_clone.push((base.clone(), dep_dir.clone()));
+                        }
+                        queue.push(base);
+                    }
+                }
+
+                // Parallel clone all discovered packages
+                if !to_clone.is_empty() {
+                    let max = if config.clone_parallelism == 0 {
+                        usize::MAX
+                    } else {
+                        config.clone_parallelism
+                    };
+                    let semaphore =
+                        std::sync::Arc::new(tokio::sync::Semaphore::new(max));
+                    let mut set = tokio::task::JoinSet::new();
+                    for (base, dep_dir) in to_clone {
+                        let permit =
+                            semaphore.clone().acquire_owned().await.unwrap();
+                        let git = git_bin.clone();
+                        let url = format!("{}/{}.git", gitlab_url, base);
+                        set.spawn_blocking(move || {
+                            let _permit = permit;
+                            let mut cmd = std::process::Command::new(&git);
+                            cmd.arg("clone").arg("--depth=1");
+                            if let Ok(ca) = std::env::var("SSL_CERT_FILE") {
+                                cmd.env("GIT_SSL_CAINFO", ca);
+                            }
+                            let status = cmd.arg(&url).arg(&dep_dir).status();
+                            (base, dep_dir, status)
+                        });
+                    }
+                    while let Some(result) = set.join_next().await {
+                        match result {
+                            Ok((_base, d, Ok(s))) if s.success() => {
+                                all_dirs.push(d);
+                            }
+                            Ok((base, _, Ok(s))) => {
+                                eprintln!(
+                                    "{} {}",
+                                    c.error.paint("error:"),
+                                    tr!("git clone failed for {} (exit {})", base, s.code().unwrap_or(-1)),
+                                );
+                            }
+                            Ok((base, _, Err(e))) => {
+                                eprintln!(
+                                    "{} {}",
+                                    c.error.paint("error:"),
+                                    tr!("failed to run git for {}: {}", base, e),
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{} {}",
+                                    c.error.paint("error:"),
+                                    tr!("clone task panicked: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                all_dirs.sort();
+                all_dirs.dedup();
+
+                if !all_dirs.is_empty() {
+                    match PkgbuildRepo::from_pkgbuilds(config, &all_dirs) {
                         Ok(repo) => config.pkgbuild_repos.repos.push(repo),
                         Err(e) => print_error(config.color.error, e),
                     }
@@ -1086,12 +1246,6 @@ impl Installer {
             return Ok(());
         }
 
-        config.init_alpm()?;
-
-        if self.refresh != 0 {
-            config.pkgbuild_repos.refresh(config)?;
-            self.done_something = true;
-        }
         self.resolve_targets(config, &repo_targets, &aur_targets)
             .await
     }
@@ -1124,8 +1278,23 @@ impl Installer {
             self.upgrades = upgrades;
         }
 
-        let mut targets = repo_targets.to_vec();
-        targets.extend(aur_targets);
+        // Build targets with explicit pkgbuild repo prefixes so the resolver
+        // skips syncdb for packages that should be built from source.
+        // This follows paru's pattern: AUR packages naturally bypass syncdb
+        // because they aren't in it; we achieve the same by setting the repo
+        // on Targ so where_is_target returns Pkgbuild instead of Unspecified.
+        let mut owned_pkg_repos: Vec<(String, String)> = Vec::new();
+        let mut targets: Vec<Targ<'_>> = Vec::new();
+        targets.extend(repo_targets.iter().copied());
+        for t in aur_targets {
+            if t.repo.is_some() {
+                targets.push(*t);
+            } else if let Some((pp, _)) = config.pkgbuild_repos.pkg(config, t.pkg) {
+                owned_pkg_repos.push((pp.repo.clone(), t.pkg.to_string()));
+            } else {
+                targets.push(*t);
+            }
+        }
         targets.extend(self.upgrades.aur_keep.iter().map(|p| Targ {
             repo: Some(config.aur_namespace()),
             pkg: p,
@@ -1136,6 +1305,15 @@ impl Installer {
         }));
 
         targets.extend(self.upgrades.repo_keep.iter().map(Targ::from));
+
+        let owned_targs: Vec<Targ> = owned_pkg_repos
+            .iter()
+            .map(|(repo, pkg)| Targ {
+                repo: Some(repo.as_str()),
+                pkg: pkg.as_str(),
+            })
+            .collect();
+        targets.extend(owned_targs.iter().copied());
 
         if self.shoud_just_pacman(config.mode, aur_targets, &self.upgrades, self.ran_pacman) {
             print_warnings(config, &cache, None);

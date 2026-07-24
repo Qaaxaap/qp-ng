@@ -75,7 +75,7 @@ pub struct PkgbuildRepo {
 impl PkgbuildRepo {
     pub fn new(name: String, path: PathBuf) -> Self {
         PkgbuildRepo {
-            depth: 2,
+            depth: 3,
             path,
             name,
             source: RepoSource::None,
@@ -113,6 +113,10 @@ impl PkgbuildRepo {
         self.pkgs(config)
             .iter()
             .find_map(|srcinfo| srcinfo.srcinfo.pkg(pkg).map(|p| (srcinfo, p)))
+    }
+
+    pub fn invalidate_cache(&mut self) {
+        self.pkgs = OnceCell::new();
     }
 
     pub fn from_cwd(config: &Config) -> Result<PkgbuildRepo> {
@@ -421,8 +425,7 @@ impl PkgbuildRepos {
         let review_repos = repos
             .iter()
             .filter(|r| {
-                !config
-                    .pkgbuild_repos
+                !self
                     .repo(&r.name)
                     .map(|r| r.skip_review)
                     .unwrap_or(false)
@@ -434,7 +437,9 @@ impl PkgbuildRepos {
         let all_repos = repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>();
         self.fetch.merge(&all_repos)?;
 
-        self.repos.iter().for_each(|r| r.generate_srcinfos(config));
+        self.repos
+            .iter()
+            .for_each(|r| r.generate_srcinfos(config));
         Ok(())
     }
 }

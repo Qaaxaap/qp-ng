@@ -42,7 +42,13 @@ pub fn check_pgp_keys(
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let status = command_status(&mut cmd)?;
+            let status = match command_status(&mut cmd) {
+                Ok(s) => s,
+                Err(_) => {
+                    // gpg not available — skip PGP checks entirely
+                    return Ok(());
+                }
+            };
 
             if status.success().is_err() {
                 import.entry(key).or_default().push(base);

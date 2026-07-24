@@ -539,6 +539,9 @@ pub struct Config {
     pub mark_auto_provides: bool,
     /// Prefer building official repo packages from GitLab source instead of binaries
     pub build_official_from_source: bool,
+    /// Max concurrent git clones during recursive PKGBUILD fetch (0 = unlimited)
+    #[default = 4]
+    pub clone_parallelism: usize,
 
     pub env: Vec<(String, String)>,
 
@@ -1141,6 +1144,7 @@ then initialise it with:
             "SearchBy" => self.search_by = ConfigEnum::from_str(key, value?.as_str())?,
             "Limit" => self.limit = value?.parse()?,
             "CompletionInterval" => self.completion_interval = value?.parse()?,
+            "CloneParallelism" => self.clone_parallelism = value?.parse()?,
             "PacmanConf" => self.pacman_conf = Some(value?),
             "MakepkgConf" => self.makepkg_conf = Some(value?),
             "DevelSuffixes" => {
